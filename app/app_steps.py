@@ -766,7 +766,7 @@ if tab=="Step 7":
 
 # STEP 8: Launch Chatbot
 if tab=="Step 8":
-    # ---------------- Step 8: Launch Chatbot (replace your Step 8 UI with this) ----------------
+    # ---------------- Step 8: Launch Chatbot ----------------
     # helper: simple fallback answer when LLM not configured
     def fallback_generate_answer(question, retrieved_chunks, top_k=3):
         """
@@ -791,54 +791,52 @@ if tab=="Step 8":
 
     st.title("Step 8 — Launch Chatbot")
 
-    # show configuration status JSON
-    st.subheader("Configuration status:")
-    st.json(st.session_state["completed_steps"])
+    # Decide mode: config vs chatbot (default config)
+    mode = st.session_state.get("mode", "config")
 
-    # UI for app name, tagline, welcome message
-    st.markdown("---")
-    col_name, col_tag = st.columns([2,3])
-    with col_name:
-        app_name = st.text_input("App name", value=st.session_state.get("launched_app_name","DocuBot Studio"))
-    with col_tag:
-        tagline = st.text_input("Tagline", value=st.session_state.get("launched_tagline","Transform documentation into AI assistants."))
+    if mode == "config":
+        # show configuration status JSON
+        st.subheader("Configuration status:")
+        st.json(st.session_state["completed_steps"])
 
-    welcome_note = st.text_area("Welcome note (shown when chatbot opens)", value=st.session_state.get("launched_welcome","Hi — I'm your document assistant. Ask me anything about the uploaded docs!"), height=80)
+        # UI for app name, tagline, welcome message
+        st.markdown("---")
+        col_name, col_tag = st.columns([2,3])
+        with col_name:
+            app_name = st.text_input("App name", value=st.session_state.get("launched_app_name","DocuBot Studio"))
+        with col_tag:
+            tagline = st.text_input("Tagline", value=st.session_state.get("launched_tagline","Transform documentation into AI assistants."))
 
-    launch_col1, launch_col2 = st.columns([1,1])
-    with launch_col1:
-        if st.button("Launch Chatbot", key="launch_chatbot_btn"):
-            st.session_state["launched"] = True
-            st.session_state["launched_app_name"] = app_name
-            st.session_state["launched_tagline"] = tagline
-            st.session_state["launched_welcome"] = welcome_note
-            if "chat_history" not in st.session_state:
-                st.session_state["chat_history"] = []
-            st.experimental_rerun()
+        welcome_note = st.text_area("Welcome note (shown when chatbot opens)", value=st.session_state.get("launched_welcome","Hi — I'm your document assistant. Ask me anything about the uploaded docs!"), height=80)
 
-    with launch_col2:
-        if st.button("Reset Chatbot History", key="reset_chat_history_btn"):
-            st.session_state.pop("chat_history", None)
-            st.success("Chat history cleared.")
+        launch_col1, launch_col2 = st.columns([1,1])
+        with launch_col1:
+            if st.button("Launch Chatbot", key="launch_chatbot_btn"):
+                st.session_state["mode"] = "chatbot"
+                st.session_state["launched_app_name"] = app_name
+                st.session_state["launched_tagline"] = tagline
+                st.session_state["launched_welcome"] = welcome_note
+                st.session_state.setdefault("chat_history", [])
+        with launch_col2:
+            if st.button("Reset Chatbot History", key="reset_chat_history_btn"):
+                st.session_state.pop("chat_history", None)
+                st.success("Chat history cleared.")
 
-    st.markdown("----")
-    st.caption("After launching, the configuration panel will be replaced with the interactive chatbot. Use the Close button in the chat header to return here.")
+        st.markdown("----")
+        st.caption("After launching, the configuration panel will be replaced with the interactive chatbot. Use the Close button in the chat header to return here.")
 
-    # If launched -> show chat UI (replace config view)
-    if st.session_state.get("launched"):
+    elif mode == "chatbot":
+        # Chat header
         st.markdown("---")
         st.markdown(f"## {st.session_state.get('launched_app_name','DocuBot Studio')}")
         st.markdown(f"**{st.session_state.get('launched_tagline','Transform documentation into AI assistants.')}**")
         close_col, spacer = st.columns([1,9])
         with close_col:
             if st.button("Close Chatbot", key="close_chatbot"):
-                st.session_state["launched"] = False
-                st.experimental_rerun()
+                st.session_state["mode"] = "config"
 
         st.markdown("---")
-        if "chat_history" not in st.session_state:
-            st.session_state["chat_history"] = []
-
+        st.session_state.setdefault("chat_history", [])
         if not st.session_state["chat_history"]:
             st.session_state["chat_history"].append({"role":"bot","text": st.session_state.get("launched_welcome","Hi — I'm your document assistant. Ask me anything about the uploaded docs!")})
 
@@ -870,27 +868,25 @@ if tab=="Step 8":
                             retrieved = []
                             st.error(f"Retrieval failed: {e}")
 
-                        answer = None
                         try:
+                            answer_text = None
                             if ("OPENAI_API_KEY" in st.secrets) or ("OPENAI_API_KEY" in os.environ):
                                 try:
                                     answer_obj = generate_answer_openai(query, retrieved, model_choice=st.session_state.get("llm_choice","gpt-4o-mini"), temperature=0.0)
-                                    answer = answer_obj.get("answer") if isinstance(answer_obj, dict) else str(answer_obj)
+                                    answer_text = answer_obj.get("answer") if isinstance(answer_obj, dict) else str(answer_obj)
                                 except Exception as e:
                                     st.warning(f"LLM call failed, using fallback: {e}")
-                                    answer = fallback_generate_answer(query, retrieved)
+                                    answer_text = fallback_generate_answer(query, retrieved)
                             else:
-                                answer = fallback_generate_answer(query, retrieved)
+                                answer_text = fallback_generate_answer(query, retrieved)
                         except NameError:
-                            answer = fallback_generate_answer(query, retrieved)
+                            answer_text = fallback_generate_answer(query, retrieved)
                         except Exception as e:
                             st.error(f"Error while generating answer: {e}")
-                            answer = fallback_generate_answer(query, retrieved)
+                            answer_text = fallback_generate_answer(query, retrieved)
 
-                        st.session_state["chat_history"].append({"role":"bot","text": answer})
-
-                    st.session_state["chat_input"] = ""
-                    st.experimental_rerun()
+                        st.session_state["chat_history"].append({"role":"bot","text": answer_text})
+                        st.session_state["chat_input"] = ""
 
 st.sidebar.markdown("---")
 st.sidebar.info("Use the tabs to perform each step. Mark steps complete to indicate configuration readiness.")
