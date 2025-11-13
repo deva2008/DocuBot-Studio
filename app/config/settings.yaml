@@ -1,0 +1,11 @@
+app:
+  name: "DocuBot Studio"
+  page_icon: "✈️"
+retrieval:
+  top_k: 5
+  store: "chroma"  # options: chroma, faiss, qdrant
+  chroma_dir: "./data/embeddings/chroma"
+  collection: "hr_policies"
+models:
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  llm: "gpt-4o-mini"

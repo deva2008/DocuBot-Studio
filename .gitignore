@@ -1,0 +1,22 @@
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.windsurf/rules/snyk_rules.md
+
+# Environment/Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Streamlit
+.streamlit/*
+!.streamlit/config.toml
+
+# Data & logs
+data/**
+!data/sample_policies/**
+logs/**
+models/**
