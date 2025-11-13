@@ -1,5 +1,5 @@
 # app_steps.py — Step-by-step RAG configurator + Chatbot
-import os, io, time, json, tempfile
+import os, io, time, json, tempfile, csv
 import logging, threading
 from dotenv import load_dotenv
 from typing import List, Dict
@@ -496,7 +496,6 @@ if tab=="Step 3":
 # STEP 4: Build index & Retrieval
 if tab=="Step 4":
     st.header("Step 4 — Build Index & Retrieval Test")
-    top_k = st.slider("Top-k for retrieval testing", 1, 10, 5)
     if st.button("Build FAISS index"):
         embs = [c.embedding for c in st.session_state["chunks"] if c.embedding is not None]
         if not embs:
@@ -504,154 +503,197 @@ if tab=="Step 4":
         else:
             st.session_state["faiss_index"] = build_faiss_index(embs)
             st.success("FAISS index built.")
+    # ---------- Enhanced retrieval testers (single + batch) ----------
+    DEFAULT_SAMPLE_QUESTIONS = [
+        "What is Flykite Airlines' leave accrual policy?",
+        "Who is responsible for HR grievances?",
+        "How to apply for maternity leave?",
+        "What are the employee code of conduct guidelines?",
+        "What is the vacation carry-over limit?",
+    ]
 
-    # Sample queries helper
-    SAMPLE_QUERIES = {
-        "General Policy": [
-            "What should an employee do if they are unsure about an HR policy?",
-            "Who should I contact for questions related to HR compliance?",
-            "Where can I find the latest HR policy document for Flykite Airlines?",
-        ],
-        "Leave & Attendance": [
-            "How many days of annual leave can full-time employees take each year?",
-            "What is the process to apply for casual leave?",
-            "What happens if an employee takes leave without approval?",
-        ],
-        "Probation & Confirmation": [
-            "What are the rules during an employee’s probation period?",
-            "What happens if my probation is extended?",
-            "When does an employee become eligible for benefits after joining?",
-        ],
-        "Compensation & Benefits": [
-            "When are salary revisions or appraisals conducted?",
-            "What benefits are employees entitled to after confirmation?",
-            "Is medical insurance provided for employees and their dependents?",
-        ],
-        "Disciplinary & Conduct": [
-            "What actions can lead to disciplinary proceedings?",
-            "What should I do if I witness workplace harassment?",
-            "What is the company’s policy on confidentiality and data handling?",
-        ],
-        "Working Hours & Overtime": [
-            "What are the standard working hours per day?",
-            "Is overtime compensated and how is it approved?",
-        ],
-        "Travel & Expenses": [
-            "How should business travel expenses be claimed?",
-            "What is the reimbursement timeline for approved travel expenses?",
-        ],
-        "Resignation & Exit": [
-            "What is the required notice period for resignation?",
-            "Are employees eligible for gratuity on exit?",
-            "What happens if an employee leaves without serving the notice period?",
-        ],
-    }
+    def read_questions_from_uploaded(file_obj) -> list:
+        try:
+            content = io.TextIOWrapper(file_obj, encoding="utf-8").read()
+        except Exception:
+            content = file_obj.read().decode("utf-8")
+        lines = [l.strip() for l in content.splitlines() if l.strip()]
+        if not lines:
+            return []
+        if len(lines) == 1 and (",") in lines[0] and not lines[0].lower().startswith("question"):
+            parts = [p.strip() for p in lines[0].split(",") if p.strip()]
+            if parts:
+                return parts
+        return lines
 
-    options = ["-- Custom (type below) --"]
-    for group, qs in SAMPLE_QUERIES.items():
-        for q in qs:
-            options.append(f"{group} — {q}")
-
-    st.markdown("**Test retrieval — pick a sample query or type your own**")
-    selected = st.selectbox("Pick a sample query (or choose Custom to type your own)", options)
-    if selected and selected != options[0]:
-        _, sample_text = selected.split(" — ", 1)
-        default_query = sample_text
-    else:
-        default_query = ""
-
-    query = st.text_area("Test retrieval: enter a sample query", value=default_query, height=80)
-
-    cols = st.columns([1,3])
-    with cols[0]:
-        if st.button("Run retrieval test"):
-            if not query.strip():
-                st.warning("Enter a query.")
+    def parse_retrieval_results(results, top_k: int = 5):
+        parsed = []
+        for r in (results or []):
+            item = {"chunk_text": None, "source": None, "score": None}
+            if isinstance(r, dict):
+                item["chunk_text"] = r.get("chunk_text") or r.get("text") or r.get("content") or r.get("chunk")
+                item["source"] = r.get("source") or r.get("doc_id") or r.get("meta") or r.get("filename")
+                item["score"] = r.get("score") or r.get("dist") or r.get("similarity")
+            elif isinstance(r, (list, tuple)):
+                if len(r) == 1:
+                    item["chunk_text"] = r[0]
+                elif len(r) == 2:
+                    item["chunk_text"], item["score"] = r
+                elif len(r) >= 3:
+                    item["source"], item["chunk_text"], item["score"] = r[0], r[1], r[2]
             else:
-                try:
-                    retrieved = retrieve_in_memory(query.strip(), top_k=top_k)
-                except Exception as e:
-                    st.error(f"Retrieval failed: {e}")
-                    retrieved = []
+                for attr in ("chunk_text", "text", "content", "chunk"):
+                    if hasattr(r, attr):
+                        item["chunk_text"] = getattr(r, attr)
+                        break
+                for attr in ("source", "doc_id", "meta", "filename"):
+                    if hasattr(r, attr):
+                        item["source"] = getattr(r, attr)
+                        break
+                for attr in ("score", "dist", "similarity"):
+                    if hasattr(r, attr):
+                        item["score"] = getattr(r, attr)
+                        break
+                if item["chunk_text"] is None:
+                    try:
+                        item["chunk_text"] = str(r)
+                    except Exception:
+                        item["chunk_text"] = "<unparseable result>"
+            parsed.append(item)
+        return parsed[:top_k]
 
-                if retrieved:
-                    st.success(f"Showing top {len(retrieved)} results")
-                    for i, r in enumerate(retrieved, start=1):
-                        score = r.get("score") if isinstance(r, dict) else None
-                        text = r.get("text") if isinstance(r, dict) else str(r)
-                        source = r.get("source", "unknown") if isinstance(r, dict) else "unknown"
-                        with st.expander(f"Result #{i} — score: {score} — source: {source}", expanded=(i==1)):
-                            st.write(text)
-                else:
-                    st.info("No results.")
-    with cols[1]:
-        st.info("Pick a sample query from the dropdown or type your custom text. Build the FAISS index for semantic results; otherwise keyword fallback is used.")
+    st.subheader("Test queries (single or batch)")
+    if "sample_questions" not in st.session_state:
+        st.session_state["sample_questions"] = DEFAULT_SAMPLE_QUESTIONS.copy()
 
-    # Enhanced: Batch Test for all sample queries
-    def _extract_result_fields(r):
-        chunk_text = None
-        source = None
-        score = None
-        if isinstance(r, dict):
-            chunk_text = r.get("chunk_text") or r.get("text") or r.get("content") or r.get("chunk")
-            source = r.get("source") or r.get("meta") or r.get("doc_id") or r.get("filename")
-            score = r.get("score") or r.get("distance") or r.get("sim")
-        else:
+    col1, col2 = st.columns([3,1])
+    with col1:
+        input_mode = st.radio(
+            "Provide test queries:",
+            ("Use defaults", "Upload questions file", "Paste/Enter manually"),
+            index=0,
+        )
+    with col2:
+        st.caption("Formats: .txt (one per line) or CSV (lines or comma-separated)")
+
+    uploaded = None
+    if input_mode == "Upload questions file":
+        uploaded = st.file_uploader(
+            "Upload a .txt or .csv file with one question per line",
+            type=["txt", "csv"],
+            accept_multiple_files=False,
+        )
+        if uploaded:
             try:
-                chunk_text = getattr(r, "chunk_text", None) or getattr(r, "text", None) or getattr(r, "content", None)
-                source = getattr(r, "source", None) or getattr(r, "meta", None) or getattr(r, "doc_id", None)
-                score = getattr(r, "score", None) or getattr(r, "distance", None) or getattr(r, "sim", None)
-            except Exception:
-                pass
-        if chunk_text is None and (isinstance(r, (list, tuple)) and len(r) > 0):
-            chunk_text = r[0]
-            if len(r) == 2:
-                if isinstance(r[1], (int, float)):
-                    score = r[1]
+                parsed = read_questions_from_uploaded(uploaded)
+                if parsed:
+                    st.session_state["sample_questions"] = parsed
+                    st.success(f"Loaded {len(parsed)} questions from file.")
                 else:
-                    source = r[1] or source
-            elif len(r) >= 3:
-                score = r[1] or score
-                source = r[2] or source
-        if chunk_text is None:
-            chunk_text = str(r)
-        return {"chunk_text": chunk_text, "source": source or "unknown", "score": score}
-
-    if st.button("Run batch test (all sample queries)"):
-        all_qs = []
-        for grp, qs in SAMPLE_QUERIES.items():
-            for q in qs:
-                all_qs.append((grp, q))
-        batch_summary = []
-        batch_details = {}
-        for grp, q in all_qs:
-            try:
-                rr = retrieve_in_memory(q, top_k=top_k)
+                    st.warning("Uploaded file parsed to 0 questions.")
             except Exception as e:
-                rr = None
-                st.write(f"Error running query: {q} -> {e}")
-            if rr:
-                parsed = [_extract_result_fields(r) for r in rr]
-                top_source = parsed[0]["source"] if parsed else "none"
-                top_score = parsed[0]["score"] if parsed else None
-                batch_summary.append({"group": grp, "query": q, "top_source": top_source, "top_score": top_score})
-                batch_details[q] = parsed
+                st.error(f"Failed to parse uploaded file: {e}")
+
+    if input_mode == "Paste/Enter manually":
+        txt = st.text_area("Paste one question per line", height=160)
+        if st.button("Save pasted questions"):
+            lines = [l.strip() for l in txt.splitlines() if l.strip()]
+            if lines:
+                st.session_state["sample_questions"] = lines
+                st.success(f"Saved {len(lines)} questions for testing.")
             else:
-                batch_summary.append({"group": grp, "query": q, "top_source": "error/no-results", "top_score": None})
-                batch_details[q] = []
-        df = pd.DataFrame(batch_summary)
-        st.markdown("**Batch test summary (one row per sample query)**")
-        st.dataframe(df)
-        st.markdown("**Batch details** — expand a query to see its top-k chunks")
-        for q, parsed in batch_details.items():
-            with st.expander(q, expanded=False):
-                if not parsed:
-                    st.write("No results")
-                else:
-                    for i, r in enumerate(parsed, start=1):
-                        st.write(f"**{i}. source:** {r['source']} — **score:** {r['score']}")
-                        st.write(r['chunk_text'])
-                        st.markdown("---")
+                st.warning("No valid questions found in pasted text.")
+
+    st.markdown("**Current sample questions (editable)**")
+    questions_container = st.empty()
+    with questions_container.container():
+        for i, q in enumerate(st.session_state["sample_questions"]):
+            new_q = st.text_input(f"Q{i+1}", value=q, key=f"q_edit_{i}")
+            st.session_state["sample_questions"][i] = new_q
+
+    if st.button("Add a new blank sample question"):
+        st.session_state["sample_questions"].append("")
+
+    if st.button("Save sample questions (trim empties)"):
+        st.session_state["sample_questions"] = [q for q in st.session_state["sample_questions"] if q and q.strip()]
+        st.success("Saved.")
+
+    st.divider()
+
+    st.markdown("### Single-query tester")
+    query_col1, query_col2 = st.columns([3,1])
+    with query_col1:
+        selected = st.selectbox(
+            "Select sample question (or type a custom query below)",
+            options=["-- choose sample --"] + st.session_state["sample_questions"],
+            index=0,
+            key="sample_select",
+        )
+        custom_query = st.text_input("Or type your own query here", value="", placeholder="Type a query and press Run")
+    with query_col2:
+        top_k_single = st.number_input("Top-k", min_value=1, max_value=20, value=5, step=1)
+        run_single = st.button("Run retrieval test")
+
+    if run_single:
+        q = custom_query.strip() if custom_query.strip() else (selected if selected != "-- choose sample --" else "")
+        if not q:
+            st.warning("Enter a query or select a sample question.")
+        else:
+            with st.spinner("Running retrieval..."):
+                t0 = time.time()
+                try:
+                    results = retrieve_in_memory(q, top_k=int(top_k_single))
+                except Exception as e:
+                    st.error(f"retrieve_in_memory raised an error: {e}")
+                    results = []
+                elapsed = time.time() - t0
+            parsed = parse_retrieval_results(results, top_k=int(top_k_single))
+            st.success(f"Retrieved {len(parsed)} results in {elapsed:.2f}s")
+            for i, r in enumerate(parsed):
+                st.markdown(f"**Result #{i+1}** — Score: {r.get('score')}")
+                st.write(r.get("chunk_text"))
+                if r.get("source"):
+                    st.caption(f"source: {r.get('source')}")
+
+    st.divider()
+
+    st.markdown("### Batch test (run ALL sample questions)")
+    batch_top_k = st.number_input("Batch Top-k", min_value=1, max_value=20, value=3, step=1, key="batch_top_k")
+    run_batch = st.button("Run Batch Test")
+
+    if run_batch:
+        qlist = [q for q in st.session_state["sample_questions"] if q and q.strip()]
+        if not qlist:
+            st.warning("No sample questions available. Add/copy/paste some questions first.")
+        else:
+            summary = []
+            full_results = {}
+            with st.spinner(f"Running batch retrieval for {len(qlist)} questions..."):
+                for q in qlist:
+                    t0 = time.time()
+                    try:
+                        res = retrieve_in_memory(q, top_k=int(batch_top_k))
+                    except Exception as e:
+                        res = []
+                        st.error(f"Error while retrieving for query: {q[:80]}... -> {e}")
+                    t_elapsed = time.time() - t0
+                    parsed = parse_retrieval_results(res, top_k=int(batch_top_k))
+                    top_score = parsed[0].get("score") if parsed else None
+                    summary.append({"query": q, "retrieved": len(parsed), "top_score": top_score, "time_s": round(t_elapsed, 3)})
+                    full_results[q] = parsed
+            st.markdown("**Batch summary**")
+            st.table(summary)
+            st.markdown("**Details**")
+            for q in qlist:
+                with st.expander(q, expanded=False):
+                    parsed = full_results.get(q, [])
+                    if not parsed:
+                        st.write("No results.")
+                    for i, r in enumerate(parsed):
+                        st.markdown(f"**#{i+1}** — score: {r.get('score')}")
+                        st.write(r.get("chunk_text"))
+                        if r.get("source"):
+                            st.caption(f"source: {r.get('source')}")
     if st.button("Mark Step 4 Complete"):
         st.session_state["completed_steps"]["step4"]=True
         st.success("Step 4 marked complete.")
@@ -724,33 +766,131 @@ if tab=="Step 7":
 
 # STEP 8: Launch Chatbot
 if tab=="Step 8":
-    st.header("Step 8 — Launch Chatbot")
-    all_done = all(st.session_state["completed_steps"].values())
-    st.write("Configuration status:")
-    st.json(st.session_state["completed_steps"])
-    if not all_done:
-        st.warning("Not all steps marked complete. You can still launch the chatbot for testing, but recommended to finish all steps.")
-    question = st.text_input("Ask the chatbot a question", value="")
-    if st.button("Send"):
-        if not question:
-            st.warning("Enter a question.")
+    # ---------------- Step 8: Launch Chatbot (replace your Step 8 UI with this) ----------------
+    # helper: simple fallback answer when LLM not configured
+    def fallback_generate_answer(question, retrieved_chunks, top_k=3):
+        """
+        Simple fallback: if we have retrieved chunks, return the top one + pointer.
+        """
+        if not retrieved_chunks:
+            return "I couldn't find relevant document excerpts to answer that. Try rewording your question."
+        first = retrieved_chunks[0]
+        if isinstance(first, dict):
+            text = first.get("chunk_text") or first.get("text") or first.get("content") or str(first)
+            source = first.get("source") or first.get("doc_id") or ""
+        elif isinstance(first, (list, tuple)):
+            text = first[1] if len(first) > 1 else str(first[0])
+            source = first[0] if len(first) > 2 else ""
         else:
-            retrieved = retrieve_in_memory(question, top_k=5)
-            try:
-                if OpenAI is None:
-                    st.error("OpenAI client not installed. Install 'openai' package and set OPENAI_API_KEY.")
-                    gen = {"answer":"[OpenAI not configured]","sources":[]}
-                elif not get_openai_api_key():
-                    st.error("OpenAI API key missing — set it in Step 3 to use OpenAI LLMs.")
-                    gen = {"answer":"[OpenAI not configured]","sources":[]}
+            text = str(first)
+            source = ""
+        answer = f"Here is an excerpt that may help:\n\n{text}\n\n(If this doesn't answer your question, try rephrasing or run the retrieval test.)"
+        if source:
+            answer += f"\n\nSource: {source}"
+        return answer
+
+    st.title("Step 8 — Launch Chatbot")
+
+    # show configuration status JSON
+    st.subheader("Configuration status:")
+    st.json(st.session_state["completed_steps"])
+
+    # UI for app name, tagline, welcome message
+    st.markdown("---")
+    col_name, col_tag = st.columns([2,3])
+    with col_name:
+        app_name = st.text_input("App name", value=st.session_state.get("launched_app_name","DocuBot Studio"))
+    with col_tag:
+        tagline = st.text_input("Tagline", value=st.session_state.get("launched_tagline","Transform documentation into AI assistants."))
+
+    welcome_note = st.text_area("Welcome note (shown when chatbot opens)", value=st.session_state.get("launched_welcome","Hi — I'm your document assistant. Ask me anything about the uploaded docs!"), height=80)
+
+    launch_col1, launch_col2 = st.columns([1,1])
+    with launch_col1:
+        if st.button("Launch Chatbot", key="launch_chatbot_btn"):
+            st.session_state["launched"] = True
+            st.session_state["launched_app_name"] = app_name
+            st.session_state["launched_tagline"] = tagline
+            st.session_state["launched_welcome"] = welcome_note
+            if "chat_history" not in st.session_state:
+                st.session_state["chat_history"] = []
+            st.experimental_rerun()
+
+    with launch_col2:
+        if st.button("Reset Chatbot History", key="reset_chat_history_btn"):
+            st.session_state.pop("chat_history", None)
+            st.success("Chat history cleared.")
+
+    st.markdown("----")
+    st.caption("After launching, the configuration panel will be replaced with the interactive chatbot. Use the Close button in the chat header to return here.")
+
+    # If launched -> show chat UI (replace config view)
+    if st.session_state.get("launched"):
+        st.markdown("---")
+        st.markdown(f"## {st.session_state.get('launched_app_name','DocuBot Studio')}")
+        st.markdown(f"**{st.session_state.get('launched_tagline','Transform documentation into AI assistants.')}**")
+        close_col, spacer = st.columns([1,9])
+        with close_col:
+            if st.button("Close Chatbot", key="close_chatbot"):
+                st.session_state["launched"] = False
+                st.experimental_rerun()
+
+        st.markdown("---")
+        if "chat_history" not in st.session_state:
+            st.session_state["chat_history"] = []
+
+        if not st.session_state["chat_history"]:
+            st.session_state["chat_history"].append({"role":"bot","text": st.session_state.get("launched_welcome","Hi — I'm your document assistant. Ask me anything about the uploaded docs!")})
+
+        for msg in st.session_state["chat_history"]:
+            role = msg.get("role","bot")
+            text = msg.get("text","")
+            if hasattr(st, "chat_message"):
+                with st.chat_message(role):
+                    st.markdown(text)
+            else:
+                if role == "user":
+                    st.markdown(f"> **You:** {text}")
                 else:
-                    gen = generate_answer_openai(question, retrieved, st.session_state["llm_choice"], temperature=0.0)
-                st.markdown("**Chatbot answer:**")
-                st.write(gen["answer"])
-                st.markdown("**Sources:** " + (", ".join([f"[chunk {s}]" for s in gen.get("sources",[])])))
-                st.session_state["verif_log"].append({"timestamp":time.time(), "question":question, "answer_preview":gen["answer"][:400], "sources":gen.get("sources",[]), "top_score": retrieved[0]["score"] if retrieved else 0.0, "grounded": bool(gen.get("sources"))})
-            except Exception as e:
-                st.error(f"Error: {e}")
+                    st.markdown(f"**Assistant:** {text}")
+
+        user_input = st.text_input("Type a message", key="chat_input", placeholder="Ask something about your uploaded documents...")
+        send_col, dummy = st.columns([1,9])
+        with send_col:
+            if st.button("Send", key="send_msg_btn"):
+                query = user_input.strip()
+                if not query:
+                    st.warning("Please type a question.")
+                else:
+                    st.session_state["chat_history"].append({"role":"user","text": query})
+                    with st.spinner("Generating response..."):
+                        try:
+                            retrieved = retrieve_in_memory(query, top_k=5)
+                        except Exception as e:
+                            retrieved = []
+                            st.error(f"Retrieval failed: {e}")
+
+                        answer = None
+                        try:
+                            if ("OPENAI_API_KEY" in st.secrets) or ("OPENAI_API_KEY" in os.environ):
+                                try:
+                                    answer_obj = generate_answer_openai(query, retrieved, model_choice=st.session_state.get("llm_choice","gpt-4o-mini"), temperature=0.0)
+                                    answer = answer_obj.get("answer") if isinstance(answer_obj, dict) else str(answer_obj)
+                                except Exception as e:
+                                    st.warning(f"LLM call failed, using fallback: {e}")
+                                    answer = fallback_generate_answer(query, retrieved)
+                            else:
+                                answer = fallback_generate_answer(query, retrieved)
+                        except NameError:
+                            answer = fallback_generate_answer(query, retrieved)
+                        except Exception as e:
+                            st.error(f"Error while generating answer: {e}")
+                            answer = fallback_generate_answer(query, retrieved)
+
+                        st.session_state["chat_history"].append({"role":"bot","text": answer})
+
+                    st.session_state["chat_input"] = ""
+                    st.experimental_rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.info("Use the tabs to perform each step. Mark steps complete to indicate configuration readiness.")
