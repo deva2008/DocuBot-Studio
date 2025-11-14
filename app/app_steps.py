@@ -870,7 +870,12 @@ if tab=="Step 8":
 
                         try:
                             answer_text = None
-                            if ("OPENAI_API_KEY" in st.secrets) or ("OPENAI_API_KEY" in os.environ):
+                            # Prefer centralized helper (session/env) to avoid secrets.toml errors
+                            try:
+                                key_present = bool(get_openai_api_key())
+                            except Exception:
+                                key_present = False
+                            if key_present:
                                 try:
                                     answer_obj = generate_answer_openai(query, retrieved, model_choice=st.session_state.get("llm_choice","gpt-4o-mini"), temperature=0.0)
                                     answer_text = answer_obj.get("answer") if isinstance(answer_obj, dict) else str(answer_obj)
@@ -886,7 +891,6 @@ if tab=="Step 8":
                             answer_text = fallback_generate_answer(query, retrieved)
 
                         st.session_state["chat_history"].append({"role":"bot","text": answer_text})
-                        st.session_state["chat_input"] = ""
 
 st.sidebar.markdown("---")
 st.sidebar.info("Use the tabs to perform each step. Mark steps complete to indicate configuration readiness.")
